@@ -31,7 +31,7 @@ import struct
 
 
 def chunker(seq, size):
-    return (seq[pos:pos + size] for pos in xrange(0, len(seq), size))
+    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
 class cv_imshow(gdb.Command):
     """Diplays the content of an opencv image"""
@@ -90,8 +90,8 @@ class cv_imshow(gdb.Command):
         gdb.write(cv_type_name + ' with ' + str(channels) + ' channels, ' +
                   str(rows) + ' rows and ' +  str(cols) +' cols\n')
 
-        data_address = unicode(val['data']).encode('utf-8').split()[0]
-        data_address = int(data_address, 16)
+        data_address = val['data']
+
 
         return (cols, rows, channels, line_step, data_address, data_symbol)
 
@@ -161,6 +161,7 @@ class cv_imshow(gdb.Command):
             data_address: The address of image data in memory.
             data_symbol: Python struct module code to the image data type.
         """
+
         width = int(width)
         height = int(height)
         n_channel = int(n_channel)
@@ -198,6 +199,7 @@ class cv_imshow(gdb.Command):
             gdb.write('Only 1 or 3 channels supported\n', gdb.STDERR)
             return
 
+
         # Fit the opencv elemente data in the PIL element data
         if data_symbol == 'b':
             image_data = [i+128 for i in image_data]
@@ -217,19 +219,35 @@ class cv_imshow(gdb.Command):
                               for i in image_data]
             else:
                 image_data = [0 for i in image_data]
-
-
+        
+        dump_data = []
         if n_channel == 3:
+            for i in range(0, len(image_data), 3):
+                dump_data.append((image_data[i+2], image_data[i+1], image_data[i]))
+        if n_channel == 1:
+            dump_data = image_data
+
+        #if n_channel == 3:
             # OpenCV stores the channels in BGR mode. Convert to RGB while packing.
-            image_data = zip(*[image_data[i::3] for i in [2, 1, 0]])
+            #image_data = zip(*[image_data[i::3] for i in [2, 1, 0]])
 
         # Show image.
-        img = Image.new(mode, (width, height))
-        img.putdata(image_data)
+        if n_channel == 1:
+            img = Image.new(mode, (width, height))
+        if n_channel == 3:
+            img = Image.new(mode, (width, height), color=(0,0,0))
+        print('Image.new')
+        print(len(image_data))
+#        print(image_data)
+        img.putdata(dump_data)
+        print('img.putdata')
         img = pl.asarray(img);
+        print('pl.asarray')
 
         fig = pl.figure()
         b = fig.add_subplot(111)
+
+
         if n_channel == 1:
             b.imshow(img, cmap = pl.cm.Greys_r, interpolation='nearest')
         elif n_channel == 3:
