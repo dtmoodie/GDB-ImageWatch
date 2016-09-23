@@ -41,6 +41,14 @@ class cv_closeAll(gdb.Command):
     def invoke(self, arg, from_tty):
         pl.close('all')
 
+def handle_container(container, index, i):
+    if( str(container.type).find('std::vector') == 0):
+        obj = (container['_M_impl']['_M_start'] + int(index[i])).dereference()
+        return handle_container(obj, index, i+1)
+    if(str(container.type).find('cv::Mat') == 0):
+        return container
+
+
 class cv_printMat(gdb.Command):
     def __init__(self):
         super(cv_printMat, self).__init__('cv_printMat', gdb.COMMAND_SUPPORT, gdb.COMPLETE_FILENAME)
@@ -48,7 +56,13 @@ class cv_printMat(gdb.Command):
     def invoke(self, arg, from_tty):
         # Access the variable from gdb.
         frame = gdb.selected_frame()
-        val = frame.read_var(arg)
+        pos = arg.find('[')
+        if(pos == -1):
+            index = arg[arg.find('[')+1:arg.find(']')].split(',')
+            val = handle_container(frame.read_var(arg), index, 0)
+        else:
+            print('Attempting to handle container indexing')
+            val = handle_container(frame.read_var(arg[0:arg.find('[')]))
         flags = val['flags']
         depth = flags & 7
         channels = 1 + (flags >> 3) & 63;
@@ -95,7 +109,18 @@ class cv_imshow(gdb.Command):
     def invoke (self, arg, from_tty):
         # Access the variable from gdb.
         frame = gdb.selected_frame()
-        val = frame.read_var(arg)
+
+        pos = arg.find('[')
+        if(pos == -1):
+
+            val = frame.read_var(arg)
+        else:
+            print('Attempting to handle container indexing')
+            index = arg[arg.find('[')+1:arg.find(']')].split(',')
+
+            val = handle_container(frame.read_var(arg[0:arg.find('[')]), index, 0)
+
+
         if str(val.type.strip_typedefs()) == 'IplImage *':
             img_info = self.get_iplimage_info(val)
         else:
