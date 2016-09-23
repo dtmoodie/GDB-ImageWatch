@@ -28,6 +28,7 @@ import gdb
 from PIL import Image
 import pylab as pl
 import struct
+import numpy as np
 
 
 def chunker(seq, size):
@@ -39,6 +40,48 @@ class cv_closeAll(gdb.Command):
 
     def invoke(self, arg, from_tty):
         pl.close('all')
+
+class cv_printMat(gdb.Command):
+    def __init__(self):
+        super(cv_printMat, self).__init__('cv_printMat', gdb.COMMAND_SUPPORT, gdb.COMPLETE_FILENAME)
+
+    def invoke(self, arg, from_tty):
+        # Access the variable from gdb.
+        frame = gdb.selected_frame()
+        val = frame.read_var(arg)
+        flags = val['flags']
+        depth = flags & 7
+        channels = 1 + (flags >> 3) & 63;
+        rows = val['rows']
+        cols = val['cols']
+        line_step = val['step']['p'][0]
+        data_address = val['data']
+        infe = gdb.inferiors()
+        memory_data = infe[0].read_memory(data_address, line_step * rows)
+        print('Matrix with rows: ', rows, ' cols: ', cols, ' channels: ', channels)
+        if depth == 0:
+            print( np.frombuffer(memory_data, dtype='uint8').reshape((rows,cols,channels)) )
+        elif depth == 1:
+            print( np.frombuffer(memory_data, dtype='int8').reshape((rows,cols,channels)) )
+        elif depth == 2:
+            print( np.frombuffer(memory_data, dtype='uint16').reshape((rows,cols,channels)) )
+        elif depth == 3:
+            print( np.frombuffer(memory_data, dtype='int16').reshape((rows,cols,channels)) )
+        elif depth == 4:
+            print( np.frombuffer(memory_data, dtype='int32').reshape((rows,cols,channels)) )
+        elif depth == 5:
+            print( np.frombuffer(memory_data, dtype='float32').reshape((rows,cols,channels)) )
+        elif depth == 6:
+            print( np.frombuffer(memory_data, dtype='float64').reshape((rows,cols,channels)) )
+        else:
+            gdb.write('Unsupported cv::Mat depth\n', gdb.STDERR)
+            return
+
+
+            
+
+
+
 
 
 class cv_imshow(gdb.Command):
@@ -273,3 +316,4 @@ class cv_imshow(gdb.Command):
 
 cv_imshow()
 cv_closeAll()
+cv_printMat()
