@@ -57,12 +57,14 @@ class cv_printMat(gdb.Command):
         # Access the variable from gdb.
         frame = gdb.selected_frame()
         pos = arg.find('[')
+
         if(pos == -1):
             index = arg[arg.find('[')+1:arg.find(']')].split(',')
-            val = handle_container(frame.read_var(arg), index, 0)
+
         else:
-            print('Attempting to handle container indexing')
             val = handle_container(frame.read_var(arg[0:arg.find('[')]))
+
+        val = handle_container(frame.read_var(arg), index, 0)
         flags = val['flags']
         depth = flags & 7
         channels = 1 + (flags >> 3) & 63;
@@ -111,15 +113,26 @@ class cv_imshow(gdb.Command):
         frame = gdb.selected_frame()
 
         pos = arg.find('[')
+
         if(pos == -1):
-
-            val = frame.read_var(arg)
+            try_this = False
+            try:
+                val = frame.read_var(arg)
+            except ValueError:
+                try_this = True
+            THIS = frame.read_var('this')
+            val = THIS[arg]
         else:
-            print('Attempting to handle container indexing')
             index = arg[arg.find('[')+1:arg.find(']')].split(',')
-
-            val = handle_container(frame.read_var(arg[0:arg.find('[')]), index, 0)
-
+            try_this = False
+            try:
+                val = frame.read_var(arg[0:arg.find('[')])
+            except ValueError:
+                try_this = True
+            if(try_this):
+                THIS = frame.read_var('this')
+                val = THIS[frame.read_var(arg[0:arg.find('[')])]
+            val = handle_container(val, index, 0)
 
         if str(val.type.strip_typedefs()) == 'IplImage *':
             img_info = self.get_iplimage_info(val)
