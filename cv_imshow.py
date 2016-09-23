@@ -33,6 +33,14 @@ import struct
 def chunker(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
+class cv_closeAll(gdb.Command):
+    def __init__(self):
+        super(cv_closeAll, self).__init__('cv_closeAll', gdb.COMMAND_SUPPORT, gdb.COMPLETE_FILENAME)
+
+    def invoke(self, arg, from_tty):
+        pl.close('all')
+
+
 class cv_imshow(gdb.Command):
     """Diplays the content of an opencv image"""
 
@@ -50,7 +58,7 @@ class cv_imshow(gdb.Command):
         else:
             img_info = self.get_cvmat_info(val)
 
-        if img_info: self.show_image(*img_info)
+        if img_info: self.show_image(arg, *img_info)
 
     @staticmethod
     def get_cvmat_info(val):
@@ -149,7 +157,7 @@ class cv_imshow(gdb.Command):
 
 
     @staticmethod
-    def show_image(width, height, n_channel, line_step, data_address, data_symbol):
+    def show_image(name, width, height, n_channel, line_step, data_address, data_symbol):
         """ Copies the image data to a PIL image and shows it.
 
         Args:
@@ -227,24 +235,16 @@ class cv_imshow(gdb.Command):
         if n_channel == 1:
             dump_data = image_data
 
-        #if n_channel == 3:
-            # OpenCV stores the channels in BGR mode. Convert to RGB while packing.
-            #image_data = zip(*[image_data[i::3] for i in [2, 1, 0]])
-
         # Show image.
         if n_channel == 1:
             img = Image.new(mode, (width, height))
         if n_channel == 3:
             img = Image.new(mode, (width, height), color=(0,0,0))
-        print('Image.new')
-        print(len(image_data))
-#        print(image_data)
         img.putdata(dump_data)
-        print('img.putdata')
         img = pl.asarray(img);
-        print('pl.asarray')
 
         fig = pl.figure()
+        fig.canvas.set_window_title(name)
         b = fig.add_subplot(111)
 
 
@@ -269,6 +269,7 @@ class cv_imshow(gdb.Command):
                 return 'x=%d, y=%d'%(col, row)
 
         b.format_coord = format_coord
-        pl.show()
+        pl.show(block=False)
 
 cv_imshow()
+cv_closeAll()
