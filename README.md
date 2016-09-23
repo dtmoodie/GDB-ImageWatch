@@ -5,7 +5,8 @@ images while debugging with gdb.
 
 ## INSTALL
 
- You need to have gdb (version 7.2 or newer).
+ You need to have gdb (version 7.2 or newer with python support).
+ You need PIL and pylab.
 
  You can try to use the `cv_imshow` command by sourcing it first from within a gdb
  session with the command
@@ -44,6 +45,13 @@ images while debugging with gdb.
  $ cd Debug
  $ cmake -DCMAKE_BUILD_TYPE=Debug .. 
  $ make
- $ gdb ./main
+ $ gdb main
+ $ break test.cpp:42
+ $ start
+ $ continue
+ $ source ../cv_imshow.py
+ $ cv_imshow matImg
+ $ cv_imshow matImgColor
+ $ cv_closeAll
  ```
 
