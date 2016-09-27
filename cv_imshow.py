@@ -31,6 +31,90 @@ import struct
 import numpy as np
 
 
+def get_next_variable_name(var_name):
+    print('Looking for delimiters in ', var_name)
+    pos1 = var_name.find('.')
+    pos2 = var_name.find('->')
+    pos3 = var_name.find('[')
+    print(pos1, ' ', pos2, ' ', pos3)
+    if(pos1 == 0):
+        pos1 = var_name[1:].find('.')
+        if(pos1 != -1):
+            pos1 = pos1 + 1
+        print(pos1)
+    if(pos2 == 0):
+        pos2 = var_name[2:].find('->') + 2
+    if(pos3 == 0):
+        pos3 = var_name[1:].find('[') + 1
+
+    if(pos1 == -1 and pos2 == -1 and pos3 == -1):
+        print('Did not find any delimiters in ', var_name)
+        return [var_name, '']
+    if(pos1 == -1):
+        pos1 = len(var_name) + 1
+    if(pos2 == -1):
+        pos2 = len(var_name) + 1
+    if(pos3 == -1):
+        pos3 = len(var_name) + 1
+
+    print(pos1, ' ', pos2, ' ', pos3)
+    if(pos1 < pos2 and pos1 < pos3):
+        print('Delimiter \'.\' found at ', pos1)
+        return [var_name[0:pos1], var_name[pos1:]]
+    if(pos2 < pos1 and pos2 < pos3):
+        print('Delimiter \'->\' found at ', pos2)
+        return [var_name[0:pos2], var_name[pos2:]]
+    if(pos3 < pos1 and pos3 < pos2):
+        print('Delimiter \'[\' found at ', pos3)
+        return [var_name[0:pos3], var_name[pos3:]]
+
+def index_container(container, index):
+    if(str(container.type).find('std::vector') == 0):
+        idx_pos = index.find(']')
+        idx = int(index[0:idx_pos])
+        obj = (container['_M_impl']['_M_start'] + idx).dereference()
+        return obj, index[idx_pos+1:]
+
+
+
+def get_mat_helper(var_name, variable):
+    if(str(variable.type).find('cv::Mat') == 0):
+        return variable
+    print('Mat not found, attempting to find delimiters')
+    # find the next deliminating element
+    var_name, rest = get_next_variable_name(var_name)
+
+    print('Split var name to ', var_name, ' and ', rest)
+    if(var_name[0] == '.'):
+        variable = variable[var_name[1:]]
+    elif(var_name[0:2] == '->'):
+        variable = variable[var_name[2:]]
+    if(len(rest) == 0):
+        return variable
+    if(rest[0] == '.'):
+        return get_mat_helper(rest[1:], variable)
+    if(rest[0:2] == '->'):
+        return get_mat_helper(rest[2:], variable)
+    if(rest[0] == '['):
+        variable, rest = index_container(variable, rest[1:])
+        return get_mat_helper(rest, variable)
+
+
+def get_mat(var_name, frame):
+    print('Looking for cv::Mat named ', var_name, ' in frame ', frame.name())
+    tmp_var_name, rest = get_next_variable_name(var_name)
+    print('Split var name to ', var_name, ' and ', rest)
+    try_this = False
+    try:
+        var = frame.read_var(tmp_var_name)
+    except ValueError:
+        try_this = True
+    if(try_this):
+        var = frame.read_var('this')
+        var = var[tmp_var_name]
+    return get_mat_helper(rest, var)
+
+
 def chunker(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
@@ -56,15 +140,8 @@ class cv_printMat(gdb.Command):
     def invoke(self, arg, from_tty):
         # Access the variable from gdb.
         frame = gdb.selected_frame()
-        pos = arg.find('[')
+        val = get_mat(arg, frame)
 
-        if(pos == -1):
-            index = arg[arg.find('[')+1:arg.find(']')].split(',')
-
-        else:
-            val = handle_container(frame.read_var(arg[0:arg.find('[')]))
-
-        val = handle_container(frame.read_var(arg), index, 0)
         flags = val['flags']
         depth = flags & 7
         channels = 1 + (flags >> 3) & 63;
@@ -93,13 +170,6 @@ class cv_printMat(gdb.Command):
             gdb.write('Unsupported cv::Mat depth\n', gdb.STDERR)
             return
 
-
-            
-
-
-
-
-
 class cv_imshow(gdb.Command):
     """Diplays the content of an opencv image"""
 
@@ -109,37 +179,22 @@ class cv_imshow(gdb.Command):
                                         gdb.COMPLETE_FILENAME)
 
     def invoke (self, arg, from_tty):
+        pos = arg.find(' ')
+        flag = ''
+        if(pos != -1):
+            arg, flag = arg.split(' ')
+
         # Access the variable from gdb.
         frame = gdb.selected_frame()
 
-        pos = arg.find('[')
-
-        if(pos == -1):
-            try_this = False
-            try:
-                val = frame.read_var(arg)
-            except ValueError:
-                try_this = True
-            THIS = frame.read_var('this')
-            val = THIS[arg]
-        else:
-            index = arg[arg.find('[')+1:arg.find(']')].split(',')
-            try_this = False
-            try:
-                val = frame.read_var(arg[0:arg.find('[')])
-            except ValueError:
-                try_this = True
-            if(try_this):
-                THIS = frame.read_var('this')
-                val = THIS[frame.read_var(arg[0:arg.find('[')])]
-            val = handle_container(val, index, 0)
+        val = get_mat(arg, frame)
 
         if str(val.type.strip_typedefs()) == 'IplImage *':
             img_info = self.get_iplimage_info(val)
         else:
             img_info = self.get_cvmat_info(val)
 
-        if img_info: self.show_image(arg, *img_info)
+        if img_info: self.show_image(arg, flag, *img_info)
 
     @staticmethod
     def get_cvmat_info(val):
@@ -238,7 +293,7 @@ class cv_imshow(gdb.Command):
 
 
     @staticmethod
-    def show_image(name, width, height, n_channel, line_step, data_address, data_symbol):
+    def show_image(name, flag, width, height, n_channel, line_step, data_address, data_symbol):
         """ Copies the image data to a PIL image and shows it.
 
         Args:
@@ -288,7 +343,8 @@ class cv_imshow(gdb.Command):
             gdb.write('Only 1 or 3 channels supported\n', gdb.STDERR)
             return
 
-
+        scale_alpha = 1
+        scale_beta  = 0
         # Fit the opencv elemente data in the PIL element data
         if data_symbol == 'b':
             image_data = [i+128 for i in image_data]
@@ -304,6 +360,8 @@ class cv_imshow(gdb.Command):
             min_image_data = min(image_data)
             img_range = max_image_data - min_image_data
             if img_range > 0:
+                scale_beta = min_image_data
+                scale_alpha = img_range / 255.0
                 image_data = [int(255 * (i - min_image_data) / img_range) \
                               for i in image_data]
             else:
@@ -321,6 +379,12 @@ class cv_imshow(gdb.Command):
             img = Image.new(mode, (width, height))
         if n_channel == 3:
             img = Image.new(mode, (width, height), color=(0,0,0))
+
+        #img = np.reshape(dump_data, (height,width,n_channel)).astype(np.uint8)
+        #print(img.shape)
+        #cv2.imshow('image', img)
+        #cv2.waitKey(0)
+
         img.putdata(dump_data)
         img = pl.asarray(img);
 
@@ -339,18 +403,21 @@ class cv_imshow(gdb.Command):
             row = int(y+0.5)
             if col>=0 and col<width and row>=0 and row<height:
                 if n_channel == 1:
-                    z = img[row,col]
+                    z = img[row,col] * scale_alpha + scale_beta
                     return '(%d, %d), [%1.2f]'%(col, row, z)
                 elif n_channel == 3:
-                    z0 = img[row,col,0]
-                    z1 = img[row,col,1]
-                    z2 = img[row,col,2]
+                    z0 = img[row,col,0] * scale_alpha + scale_beta
+                    z1 = img[row,col,1] * scale_alpha + scale_beta
+                    z2 = img[row,col,2] * scale_alpha + scale_beta
                     return '(%d, %d), [%1.2f, %1.2f, %1.2f]'%(col, row, z0, z1, z2)
             else:
                 return 'x=%d, y=%d'%(col, row)
 
         b.format_coord = format_coord
-        pl.show(block=False)
+        if(flag == 'block'):
+            pl.show(block=True)
+        else:
+            pl.show(block=False)
 
 cv_imshow()
 cv_closeAll()

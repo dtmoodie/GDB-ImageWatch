@@ -24,6 +24,7 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  **/
+#include <iostream>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
@@ -32,13 +33,19 @@
 
 using namespace std;
 using namespace cv;
-
-int main(int argc, char *argv[])
+struct Struct
+{
+  cv::Mat var1;
+  std::vector<cv::Mat> vecMat;
+};
+int main(int argc, char **argv)
 {
 
-    Mat matImg = imread("../gogh.jpg", CV_LOAD_IMAGE_GRAYSCALE);
-    Mat matImg3 = imread("../gogh.jpg");
-
+    Mat matImg = imread(argv[1], CV_LOAD_IMAGE_GRAYSCALE);
+    Mat matImg3 = imread(argv[1]);
+    Struct str;
+    str.var1 = matImg;
+    str.vecMat.push_back(matImg);
     if (matImg.data == NULL) {
         cerr << "Error: Can't find file gogh.jpg" << endl;
         return -1;
