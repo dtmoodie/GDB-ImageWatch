@@ -36,12 +36,10 @@ def get_next_variable_name(var_name):
     pos1 = var_name.find('.')
     pos2 = var_name.find('->')
     pos3 = var_name.find('[')
-    print(pos1, ' ', pos2, ' ', pos3)
     if(pos1 == 0):
         pos1 = var_name[1:].find('.')
         if(pos1 != -1):
             pos1 = pos1 + 1
-        print(pos1)
     if(pos2 == 0):
         pos2 = var_name[2:].find('->') + 2
     if(pos3 == 0):
@@ -57,7 +55,6 @@ def get_next_variable_name(var_name):
     if(pos3 == -1):
         pos3 = len(var_name) + 1
 
-    print(pos1, ' ', pos2, ' ', pos3)
     if(pos1 < pos2 and pos1 < pos3):
         print('Delimiter \'.\' found at ', pos1)
         return [var_name[0:pos1], var_name[pos1:]]
@@ -80,15 +77,18 @@ def index_container(container, index):
 def get_mat_helper(var_name, variable):
     if(str(variable.type).find('cv::Mat') == 0):
         return variable
+    if(str(variable.type).find('cv::cuda::GpuMat') == 0):
+        return variable
     print('Mat not found, attempting to find delimiters')
     # find the next deliminating element
     var_name, rest = get_next_variable_name(var_name)
 
     print('Split var name to ', var_name, ' and ', rest)
-    if(var_name[0] == '.'):
-        variable = variable[var_name[1:]]
-    elif(var_name[0:2] == '->'):
-        variable = variable[var_name[2:]]
+    if(len(var_name)):
+        if(var_name[0] == '.'):
+            variable = variable[var_name[1:]]
+        elif(var_name[0:2] == '->'):
+            variable = variable[var_name[2:]]
     if(len(rest) == 0):
         return variable
     if(rest[0] == '.'):
@@ -96,14 +96,16 @@ def get_mat_helper(var_name, variable):
     if(rest[0:2] == '->'):
         return get_mat_helper(rest[2:], variable)
     if(rest[0] == '['):
+        print('Array indexing ', rest)
         variable, rest = index_container(variable, rest[1:])
         return get_mat_helper(rest, variable)
+
 
 
 def get_mat(var_name, frame):
     print('Looking for cv::Mat named ', var_name, ' in frame ', frame.name())
     tmp_var_name, rest = get_next_variable_name(var_name)
-    print('Split var name to ', var_name, ' and ', rest)
+    print('Split var name to ', tmp_var_name, ' and ', rest)
     try_this = False
     try:
         var = frame.read_var(tmp_var_name)
@@ -191,6 +193,8 @@ class cv_imshow(gdb.Command):
 
         if str(val.type.strip_typedefs()) == 'IplImage *':
             img_info = self.get_iplimage_info(val)
+        elif str(val.type.strip_typedefs()) == 'cv::cuda::GpuMat':
+            img_info = self.get_gpumat_info(val)
         else:
             img_info = self.get_cvmat_info(val)
 
@@ -230,6 +234,49 @@ class cv_imshow(gdb.Command):
         cols = val['cols']
 
         line_step = val['step']['p'][0]
+
+        gdb.write(cv_type_name + ' with ' + str(channels) + ' channels, ' +
+                  str(rows) + ' rows and ' +  str(cols) +' cols\n')
+
+        data_address = val['data']
+
+
+        return (cols, rows, channels, line_step, data_address, data_symbol)
+
+    @staticmethod
+    def get_gpumat_info(val):
+        flags = val['flags']
+        depth = flags & 7
+        channels = 1 + (flags >> 3) & 63;
+        if depth == 0:
+            cv_type_name = 'CV_8U'
+            data_symbol = 'B'
+        elif depth == 1:
+            cv_type_name = 'CV_8S'
+            data_symbol = 'b'
+        elif depth == 2:
+            cv_type_name = 'CV_16U'
+            data_symbol = 'H'
+        elif depth == 3:
+            cv_type_name = 'CV_16S'
+            data_symbol = 'h'
+        elif depth == 4:
+            cv_type_name = 'CV_32S'
+            data_symbol = 'i'
+        elif depth == 5:
+            cv_type_name = 'CV_32F'
+            data_symbol = 'f'
+        elif depth == 6:
+            cv_type_name = 'CV_64F'
+            data_symbol = 'd'
+        else:
+            gdb.write('Unsupported cv::Mat depth\n', gdb.STDERR)
+            return
+
+        rows = val['rows']
+        cols = val['cols']
+
+        line_step = val['step']
 
         gdb.write(cv_type_name + ' with ' + str(channels) + ' channels, ' +
                   str(rows) + ' rows and ' +  str(cols) +' cols\n')
@@ -311,8 +358,9 @@ class cv_imshow(gdb.Command):
         n_channel = int(n_channel)
         line_step = int(line_step)
         data_address = int(data_address)
-
+        print(data_address)
         infe = gdb.inferiors()
+
         memory_data = infe[0].read_memory(data_address, line_step * height)
 
         # Calculate the memory padding to change to the next image line.
@@ -356,10 +404,11 @@ class cv_imshow(gdb.Command):
             image_data = [(i+2147483648)>>24 for i in image_data]
         elif data_symbol in ('f','d'):
             # A float image is discretized in 256 bins for display.
-            max_image_data = max(image_data)
-            min_image_data = min(image_data)
+            max_image_data = float(max(image_data))
+            min_image_data = float(min(image_data))
             img_range = max_image_data - min_image_data
-            if img_range > 0:
+            print('Image max/min - range: %1.2f / %1.2f - %1.20f'%(max_image_data, min_image_data, img_range))
+            if img_range > 0.00000000001:
                 scale_beta = min_image_data
                 scale_alpha = img_range / 255.0
                 image_data = [int(255 * (i - min_image_data) / img_range) \
@@ -380,11 +429,6 @@ class cv_imshow(gdb.Command):
         if n_channel == 3:
             img = Image.new(mode, (width, height), color=(0,0,0))
 
-        #img = np.reshape(dump_data, (height,width,n_channel)).astype(np.uint8)
-        #print(img.shape)
-        #cv2.imshow('image', img)
-        #cv2.waitKey(0)
-
         img.putdata(dump_data)
         img = pl.asarray(img);
 
@@ -394,7 +438,8 @@ class cv_imshow(gdb.Command):
 
 
         if n_channel == 1:
-            b.imshow(img, cmap = pl.cm.Greys_r, interpolation='nearest')
+            #b.imshow(img, cmap = pl.cm.Greys_r, interpolation='nearest')
+            b.imshow(img, cmap = 'jet', interpolation='nearest')
         elif n_channel == 3:
             b.imshow(img, interpolation='nearest')
 
@@ -403,7 +448,7 @@ class cv_imshow(gdb.Command):
             row = int(y+0.5)
             if col>=0 and col<width and row>=0 and row<height:
                 if n_channel == 1:
-                    z = img[row,col] * scale_alpha + scale_beta
+                    z = float(float(img[row,col]) * scale_alpha) + float(scale_beta)
                     return '(%d, %d), [%1.2f]'%(col, row, z)
                 elif n_channel == 3:
                     z0 = img[row,col,0] * scale_alpha + scale_beta
