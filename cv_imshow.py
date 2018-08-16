@@ -26,7 +26,8 @@
 
 import gdb
 from PIL import Image
-import pylab as pl
+#import pylab as pl
+import matplotlib.pyplot as pl
 import struct
 import numpy as np
 
@@ -430,7 +431,7 @@ class cv_imshow(gdb.Command):
             img = Image.new(mode, (width, height), color=(0,0,0))
 
         img.putdata(dump_data)
-        img = pl.asarray(img);
+        img = np.array(img)
 
         fig = pl.figure()
         fig.canvas.set_window_title(name)
