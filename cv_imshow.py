@@ -23,13 +23,20 @@
 # ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+import sys
+for i in range(len(sys.path) - 1, 0, -1):
+    if(sys.path[i].find('/usr/lib/python2.7') == 0):
+        del sys.path[i]
+print(sys.version)
 
 import gdb
-from PIL import Image
-import pylab as pl
+import matplotlib
+#matplotlib.use('TKAgg')
+import matplotlib.pyplot as pl
 import struct
 import numpy as np
-
+import math
+import cv2
 
 def get_next_variable_name(var_name):
     print('Looking for delimiters in ', var_name)
@@ -66,12 +73,20 @@ def get_next_variable_name(var_name):
         return [var_name[0:pos3], var_name[pos3:]]
 
 def index_container(container, index):
-    if(str(container.type).find('std::vector') == 0):
+    if(str(container.type).find('std::vector') == 0 or \
+    str(container.type).find('const std::vector') == 0):
         idx_pos = index.find(']')
         idx = int(index[0:idx_pos])
+        print('Indexing vector element {}'.format(idx))
         obj = (container['_M_impl']['_M_start'] + idx).dereference()
         return obj, index[idx_pos+1:]
-
+    if('aq::SyncedMemory' in str(container.type)):
+        print('indexing synced memory')
+        idx_pos = index.find(']')
+        idx = int(index[0:idx_pos])
+        obj = (container['_pimpl']['_M_ptr']['h_data']['_M_impl']['_M_start'] + idx).dereference()
+        return obj, index[idx_pos+1:]
+    print('Unable to index container of type \'{}\''.format(str(container.type)))
 
 
 def get_mat_helper(var_name, variable):
@@ -79,7 +94,21 @@ def get_mat_helper(var_name, variable):
         return variable
     if(str(variable.type).find('cv::cuda::GpuMat') == 0):
         return variable
-    print('Mat not found, attempting to find delimiters')
+    if(str(variable.type).find('image') == 0):
+        return variable
+    if('aq::SyncedMemory' in str(variable.type)):
+        if('[' in var_name):
+            var_name, rest = get_next_variable_name(var_name)
+            if(rest[0] == '['):
+                variable, rest = index_container(variable, rest[1:])
+                return get_mat_helper(rest, variable)
+        return variable
+    if('mshadow::Tensor' in str(variable.type)):
+      print('found mxnet tensor')
+      return variable
+    if('Eigen::Matrix' in str(variable.type)):
+        return variable
+    print('Mat not found in variable ({}), attempting to find delimiters'.format(str(variable.type)))
     # find the next deliminating element
     var_name, rest = get_next_variable_name(var_name)
 
@@ -109,7 +138,7 @@ def get_mat(var_name, frame):
     try_this = False
     try:
         var = frame.read_var(tmp_var_name)
-    except ValueError:
+    except:
         try_this = True
     if(try_this):
         var = frame.read_var('this')
@@ -118,6 +147,7 @@ def get_mat(var_name, frame):
 
 
 def chunker(seq, size):
+    assert size > 0
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
 class cv_closeAll(gdb.Command):
@@ -138,8 +168,10 @@ def handle_container(container, index, i):
 class cv_printMat(gdb.Command):
     def __init__(self):
         super(cv_printMat, self).__init__('cv_printMat', gdb.COMMAND_SUPPORT, gdb.COMPLETE_FILENAME)
+        self.transpose = False
 
     def invoke(self, arg, from_tty):
+        self.transpose = False
         # Access the variable from gdb.
         frame = gdb.selected_frame()
         val = get_mat(arg, frame)
@@ -155,22 +187,24 @@ class cv_printMat(gdb.Command):
         memory_data = infe[0].read_memory(data_address, line_step * rows)
         print('Matrix with rows: ', rows, ' cols: ', cols, ' channels: ', channels)
         if depth == 0:
-            print( np.frombuffer(memory_data, dtype='uint8').reshape((rows,cols,channels)) )
+            dtype='uint8'
         elif depth == 1:
-            print( np.frombuffer(memory_data, dtype='int8').reshape((rows,cols,channels)) )
+            dtype='int8'
         elif depth == 2:
-            print( np.frombuffer(memory_data, dtype='uint16').reshape((rows,cols,channels)) )
+            dtype='uint16'
         elif depth == 3:
-            print( np.frombuffer(memory_data, dtype='int16').reshape((rows,cols,channels)) )
+            dtype='int16'
         elif depth == 4:
-            print( np.frombuffer(memory_data, dtype='int32').reshape((rows,cols,channels)) )
+            dtype='int32'
         elif depth == 5:
-            print( np.frombuffer(memory_data, dtype='float32').reshape((rows,cols,channels)) )
+            dtype='float32'
         elif depth == 6:
-            print( np.frombuffer(memory_data, dtype='float64').reshape((rows,cols,channels)) )
+            dtype='float64'
         else:
             gdb.write('Unsupported cv::Mat depth\n', gdb.STDERR)
             return
+        arr = np.frombuffer(memory_data, dtype=dtype).reshape((rows,cols,channels))
+        print( arr )
 
 class cv_imshow(gdb.Command):
     """Diplays the content of an opencv image"""
@@ -179,26 +213,100 @@ class cv_imshow(gdb.Command):
         super(cv_imshow, self).__init__('cv_imshow',
                                         gdb.COMMAND_SUPPORT,
                                         gdb.COMPLETE_FILENAME)
+        self.transpose = False
 
     def invoke (self, arg, from_tty):
+        self.transpose=False
         pos = arg.find(' ')
         flag = ''
-        if(pos != -1):
-            arg, flag = arg.split(' ')
-
+        save = None
+        tokens = arg.split(' ')
         # Access the variable from gdb.
         frame = gdb.selected_frame()
+        if('block' in tokens):
+            flag = 'block'
+            tokens.remove('block')
+        if 'save' in tokens:
+            idx = tokens.index('save')
+            save = tokens[idx+1]
+            tokens.remove('save')
+            tokens.remove(save)
 
-        val = get_mat(arg, frame)
+        current_line = str(gdb.decode_line()[1][0])
+        line = current_line[current_line.find(', line ') + 6:]
+        for i in range(len(tokens)):
+            token = tokens[i]
+            val = get_mat(token, frame)
+            if str(val.type.strip_typedefs()) == 'IplImage *':
+                img_info = self.get_iplimage_info(val)
+            elif str(val.type.strip_typedefs()) == 'cv::cuda::GpuMat':
+                img_info = self.get_gpumat_info(val)
+            elif str(val.type).strip() == 'image':
+                img_info = self.get_image_info(val)
+            elif str(val.type).find('SyncedMemory*') != -1:
+                print('synchronizing {}'.format(token))
+                gdb.parse_and_eval('{}->synchronize()'.format(token))
+                obj = (val['_pimpl']['_M_ptr']['h_data']['_M_impl']['_M_start']).dereference()
+                img_info = self.get_cvmat_info(obj)
+            elif str(val.type).find('SyncedMemory') != -1:
+                print('synchronizing {}'.format(token))
+                try:
+                    gdb.parse_and_eval('{}.synchronize()'.format(token))
+                except:
+                    gdb.parse_and_eval('{}->synchronize()'.format(token))
+                obj = (val['_pimpl']['_M_ptr']['h_data']['_M_impl']['_M_start']).dereference()
+                img_info = self.get_cvmat_info(obj)
+            elif 'Eigen::Matrix' in str(val.type):
+                nrows = int(gdb.parse_and_eval('{}.rows()'.format(token)))
+                ncols = int(gdb.parse_and_eval('{}.cols()'.format(token)))
+                stride = int(gdb.parse_and_eval('{}.outerStride()'.format(token)))
+                ptr = int(gdb.parse_and_eval('{}.data()'.format(token)))
+                nchannel = 1
+                print(dir(val))
+                print('Found {} of size {} x {} ptr: {} stride: {}'.format(val.dynamic_type, nrows, ncols, ptr, stride))
+                self.transpose = True
+                type_string = str(val.type)
+                dtype = 'd'
+                if(type_string[-1] == 'f' or 'float' in type_string):
+                    dtype = 'f'
 
-        if str(val.type.strip_typedefs()) == 'IplImage *':
-            img_info = self.get_iplimage_info(val)
-        elif str(val.type.strip_typedefs()) == 'cv::cuda::GpuMat':
-            img_info = self.get_gpumat_info(val)
-        else:
-            img_info = self.get_cvmat_info(val)
+                img_info = (nrows, ncols, 1, stride * 8, ptr, dtype)
 
-        if img_info: self.show_image(arg, flag, *img_info)
+
+            elif str(val.type).find('Tensor<mshadow::cpu, ') != -1:
+                type = str(val.type)
+                ndim = int(type[21 + type.find('Tensor<mshadow::cpu, ')])
+                print(ndim)
+                batch = 0
+                channel = 0
+                if(i < len(tokens) - 1):
+                    if('[' in tokens[i+1]):
+                        token = tokens[i+1]
+                        idx = [int(''.join(c for c in x if c.isdigit())) for x in token.split(',')]
+                        batch = idx[0]
+                        channel = idx[1]
+
+                nbatch = val['shape_']['shape_'][0]
+                nchannel = val['shape_']['shape_'][1]
+                nrow = val['shape_']['shape_'][2]
+                ncol = val['shape_']['shape_'][3]
+                stride = val['stride_']
+                print(str(val['dptr_']))
+                if(batch < nbatch and channel < nchannel):
+                    print('indexing batch {} and channel {}'.format(batch, channel))
+                    if(ndim == 3):
+                        nrow = nrow * nbatch
+                    img_info = (ncol, nrow, 1, stride*ncol * 4, int(val['dptr_']) +
+                                batch*nchannel*nrow*ncol + channel * nrow*ncol, 'f')
+
+            else:
+                img_info = self.get_cvmat_info(val)
+
+            if img_info:
+                if((i == len(tokens) - 1) and flag == 'block'):
+                    self.show_image(token + line, 'block', *img_info, save=save)
+                else:
+                    self.show_image(token + line, '', *img_info, save=save)
 
     @staticmethod
     def get_cvmat_info(val):
@@ -241,6 +349,16 @@ class cv_imshow(gdb.Command):
         data_address = val['data']
 
 
+        return (cols, rows, channels, line_step, data_address, data_symbol)
+
+    @staticmethod
+    def get_image_info(val):
+        channels = val['c']
+        rows = val['h']
+        cols = val['w']
+        line_step = 4 * cols * channels
+        data_address = val['data']
+        data_symbol = 'f'
         return (cols, rows, channels, line_step, data_address, data_symbol)
 
     @staticmethod
@@ -339,8 +457,8 @@ class cv_imshow(gdb.Command):
         return (cols, rows, channels, line_step, data_address, data_symbol)
 
 
-    @staticmethod
-    def show_image(name, flag, width, height, n_channel, line_step, data_address, data_symbol):
+
+    def show_image(self, name, flag, width, height, n_channel, line_step, data_address, data_symbol, save=None):
         """ Copies the image data to a PIL image and shows it.
 
         Args:
@@ -358,9 +476,7 @@ class cv_imshow(gdb.Command):
         n_channel = int(n_channel)
         line_step = int(line_step)
         data_address = int(data_address)
-        print(data_address)
         infe = gdb.inferiors()
-
         memory_data = infe[0].read_memory(data_address, line_step * height)
 
         # Calculate the memory padding to change to the next image line.
@@ -380,6 +496,7 @@ class cv_imshow(gdb.Command):
         if n_channel == 1:
             mode = 'L'
             fmt = '%d%s%dx' % (width, data_symbol, padding)
+            print('width: {} symbol: {} padding: {}'.format(width, data_symbol, padding))
             for line in chunker(memory_data, line_step):
                 image_data.extend(struct.unpack(fmt, line))
         elif n_channel == 3:
@@ -387,13 +504,19 @@ class cv_imshow(gdb.Command):
             fmt = '%d%s%dx' % (width * 3, data_symbol, padding)
             for line in chunker(memory_data, line_step):
                 image_data.extend(struct.unpack(fmt, line))
+        elif n_channel == 2:
+            fmt = '%d%s%dx' % (width * n_channel, data_symbol, padding)
+            for line in chunker(memory_data, line_step):
+                image_data.extend(struct.unpack(fmt, line))
         else:
-            gdb.write('Only 1 or 3 channels supported\n', gdb.STDERR)
+            gdb.write('Only 1, 2, or 3 channels supported\n', gdb.STDERR)
             return
 
         scale_alpha = 1
         scale_beta  = 0
         # Fit the opencv elemente data in the PIL element data
+        min_image_data = 0
+        img_range = 255
         if data_symbol == 'b':
             image_data = [i+128 for i in image_data]
         elif data_symbol == 'H':
@@ -407,30 +530,40 @@ class cv_imshow(gdb.Command):
             max_image_data = float(max(image_data))
             min_image_data = float(min(image_data))
             img_range = max_image_data - min_image_data
-            print('Image max/min - range: %1.2f / %1.2f - %1.20f'%(max_image_data, min_image_data, img_range))
+            print('Image max/min - range: %1.20f / %1.20f - %1.20f'%(max_image_data, min_image_data, img_range))
+            if(width == 1 or height == 1):
+                print(image_data)
+
             if img_range > 0.00000000001:
                 scale_beta = min_image_data
                 scale_alpha = img_range / 255.0
+                for i in range(len(image_data)):
+                    if(math.isnan(image_data[i])):
+                        image_data[i] = 0
+
                 image_data = [int(255 * (i - min_image_data) / img_range) \
                               for i in image_data]
             else:
                 image_data = [0 for i in image_data]
-        
-        dump_data = []
-        if n_channel == 3:
-            for i in range(0, len(image_data), 3):
-                dump_data.append((image_data[i+2], image_data[i+1], image_data[i]))
-        if n_channel == 1:
-            dump_data = image_data
 
         # Show image.
+        img = None
         if n_channel == 1:
-            img = Image.new(mode, (width, height))
-        if n_channel == 3:
-            img = Image.new(mode, (width, height), color=(0,0,0))
+            if(data_symbol == 'f'):
+                float_image = np.reshape(image_data, (height, width))
+            img = np.reshape(image_data, (height, width))
+            img = img.astype('uint8')
+            if(self.transpose):
+                img = img.transpose()
+        else:
+            img = np.reshape(image_data, (height, width, n_channel)).astype('uint8')
+            # swap opencv BGR to RGB
+            blue = np.copy(img[:,:,0])
+            img[:,:,0] = img[:,:,2]
+            img[:,:,2] = blue
 
-        img.putdata(dump_data)
-        img = pl.asarray(img);
+        if save is not None:
+            cv2.imwrite(save, img)
 
         fig = pl.figure()
         fig.canvas.set_window_title(name)
@@ -438,25 +571,32 @@ class cv_imshow(gdb.Command):
 
 
         if n_channel == 1:
-            #b.imshow(img, cmap = pl.cm.Greys_r, interpolation='nearest')
             b.imshow(img, cmap = 'jet', interpolation='nearest')
         elif n_channel == 3:
-            b.imshow(img, interpolation='nearest')
+            b.imshow(img)
+        elif n_channel == 2:
+            pl.gca().invert_yaxis()
+            b.scatter(img[:,:,0], img[:,:,1], s=2,alpha=0.5)
 
         def format_coord(x, y):
             col = int(x+0.5)
             row = int(y+0.5)
             if col>=0 and col<width and row>=0 and row<height:
                 if n_channel == 1:
+                    #if(data_symbol == 'f'):
+                    #    z = float_image[row,col]
+                    #else:
+                    #    z = float(float(img[row,col]) * scale_alpha) + float(scale_beta)
                     z = float(float(img[row,col]) * scale_alpha) + float(scale_beta)
-                    return '(%d, %d), [%1.2f]'%(col, row, z)
+                    #return '(%d, %d), [%1.2f]'%(col, row, z)
+                    return '(x:{}, y:{}), [{}]'.format(col, row, z)
                 elif n_channel == 3:
                     z0 = img[row,col,0] * scale_alpha + scale_beta
                     z1 = img[row,col,1] * scale_alpha + scale_beta
                     z2 = img[row,col,2] * scale_alpha + scale_beta
                     return '(%d, %d), [%1.2f, %1.2f, %1.2f]'%(col, row, z0, z1, z2)
             else:
-                return 'x=%d, y=%d'%(col, row)
+                return 'x={} ({}), y={} ({})'.format(col,width, row, height)
 
         b.format_coord = format_coord
         if(flag == 'block'):
